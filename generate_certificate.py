@@ -1,14 +1,13 @@
 #!/usr/bin/env python3
 """
-GSA Certificate Generator v4.0
-Generuje certyfikaty w jakości druku 300 DPI.
+GSA Certificate Generator v5.0
+Nakłada tekst bezpośrednio na oficjalne szablony PDF.
 
 Podejście:
-1. Otwórz szablon PDF i nanieś tekst (imię, data, numer)
-2. Wyrenderuj stronę jako obraz 300 DPI (raster)
-3. Zapisz obraz jako nowy PDF — pełna jakość druku, ~2-3 MB
-
-Dzięki temu wszystkie elementy (logo, mapa, podpis) są w 300 DPI.
+- Zamiast redakcji (która zostawia widoczną białą ramkę), używamy draw_rect
+  z dokładnym bbox placeholdera — przykrywa stary tekst bez artefaktów.
+- Tekst jest wektorowy — perfekcyjna ostrość przy każdym druku.
+- Polskie znaki obsługiwane przez fitz.TextWriter + Montserrat.
 """
 
 import fitz  # PyMuPDF
@@ -22,7 +21,6 @@ TEMPLATES_DIR = os.path.join(SCRIPT_DIR, 'templates')
 FONTS_DIR = os.path.join(SCRIPT_DIR, 'fonts')
 
 FONT_REGULAR = os.path.join(FONTS_DIR, 'Montserrat-Regular.ttf')
-FONT_BOLD = os.path.join(FONTS_DIR, 'Montserrat-Bold.ttf')
 
 # Polskie nazwy miesięcy
 POLISH_MONTHS = {
@@ -38,11 +36,16 @@ TEMPLATES = {
 }
 
 # Kolory
-BLUE_COLOR = (0.0, 0.62, 0.84)   # Niebieski kolor imienia
+BLUE_COLOR = (0.0, 0.62, 0.84)   # Niebieski kolor imienia (#0ea8da)
 DARK_COLOR = (0.15, 0.15, 0.15)  # Ciemny kolor daty i numeru
 
-# Rozdzielczość renderowania (DPI)
-RENDER_DPI = 300
+# Dokładne bboxes placeholderów (z analizy szablonu):
+# [Imię i nazwisko]: (262.2, 239.3, 580.0, 286.0) — size 38.3pt, kolor #0ea8da
+# [Numer]: (120.7, 481.9, 179.8, 498.5) — size 13.8pt
+# Wrocław, [data]: (354.4, 411.6, 487.8, 431.7) — size 16.8pt
+PLACEHOLDER_NAME = fitz.Rect(262.2, 239.3, 580.0, 286.0)
+PLACEHOLDER_NUMBER = fitz.Rect(120.7, 481.9, 179.8, 498.5)
+PLACEHOLDER_DATE = fitz.Rect(354.4, 411.6, 487.8, 431.7)
 
 
 def format_date_polish(date_str=None):
@@ -68,7 +71,7 @@ def generate_certificate(
     date_str: str = None
 ) -> dict:
     """
-    Generuje certyfikat PDF w jakości druku 300 DPI.
+    Generuje certyfikat PDF nakładając tekst na oficjalny szablon.
 
     Args:
         cert_type: "TP" (Personal Trainer) lub "GYM" (Gym Instructor)
@@ -91,28 +94,28 @@ def generate_certificate(
     doc = fitz.open(template_path)
     page = doc[0]
     page_width = page.rect.width   # 842.25
-    page_height = page.rect.height  # 595.5
 
     # Załaduj czcionkę
     font_reg = fitz.Font(fontfile=FONT_REGULAR)
 
-    # --- Krok 1: Usuń placeholdery (precyzyjne prostokąty redakcji) ---
-    page.add_redact_annot(fitz.Rect(255, 236, 590, 289), fill=(1, 1, 1))
-    page.add_redact_annot(fitz.Rect(115, 479, 250, 501), fill=(1, 1, 1))
-    page.add_redact_annot(fitz.Rect(340, 409, 510, 435), fill=(1, 1, 1))
-    page.apply_redactions()
+    # --- Krok 1: Przykryj placeholdery białymi prostokątami (bez ramki) ---
+    # Używamy draw_rect zamiast redakcji — brak artefaktów, czyste krawędzie
+    page.draw_rect(PLACEHOLDER_NAME, color=None, fill=(1, 1, 1), width=0)
+    page.draw_rect(PLACEHOLDER_NUMBER, color=None, fill=(1, 1, 1), width=0)
+    page.draw_rect(PLACEHOLDER_DATE, color=None, fill=(1, 1, 1), width=0)
 
     # --- Krok 2: Wstaw imię i nazwisko (wycentrowane, niebieskie) ---
     name_font_size = 36.0
-    name_tw = font_reg.text_length(full_name, fontsize=name_font_size)
+    name_tw_width = font_reg.text_length(full_name, fontsize=name_font_size)
 
+    # Skaluj w dół jeśli imię za długie (max 75% szerokości strony)
     max_name_width = page_width * 0.75
-    while name_tw > max_name_width and name_font_size > 18:
+    while name_tw_width > max_name_width and name_font_size > 18:
         name_font_size -= 1.0
-        name_tw = font_reg.text_length(full_name, fontsize=name_font_size)
+        name_tw_width = font_reg.text_length(full_name, fontsize=name_font_size)
 
-    name_x = (page_width - name_tw) / 2
-    name_y = 276
+    name_x = (page_width - name_tw_width) / 2
+    name_y = 276  # baseline
 
     tw_name = fitz.TextWriter(page.rect, color=BLUE_COLOR)
     tw_name.append((name_x, name_y), full_name, font=font_reg, fontsize=name_font_size)
@@ -128,29 +131,14 @@ def generate_certificate(
     tw_dark = fitz.TextWriter(page.rect, color=DARK_COLOR)
     tw_dark.append((date_x, date_y), date_text, font=font_reg, fontsize=date_font_size)
 
-    # --- Krok 4: Wstaw numer certyfikatu ---
+    # --- Krok 4: Wstaw numer certyfikatu (lewy dolny róg) ---
     tw_dark.append((121, 494), cert_number, font=font_reg, fontsize=13.8)
+
     tw_dark.write_text(page)
 
-    # --- Krok 5: Wyrenderuj stronę jako obraz 300 DPI ---
-    scale = RENDER_DPI / 72.0  # 72 DPI to domyślna rozdzielczość PDF
-    mat = fitz.Matrix(scale, scale)
-    pix = page.get_pixmap(matrix=mat, alpha=False)
-
-    # --- Krok 6: Zapisz obraz jako nowy PDF (A4, 300 DPI) ---
-    # Nowy dokument PDF z jedną stroną A4
-    new_doc = fitz.open()
-    new_page = new_doc.new_page(width=page_width, height=page_height)
-
-    # Wstaw wyrenderowany obraz jako pełnostronicowy obrazek
-    img_bytes = pix.tobytes("jpeg", jpg_quality=98)
-    img_rect = fitz.Rect(0, 0, page_width, page_height)
-    new_page.insert_image(img_rect, stream=img_bytes)
-
-    # Zapisz do bytes
+    # Zapisz do bytes — wektorowy PDF, perfekcyjna jakość druku
     buf = io.BytesIO()
-    new_doc.save(buf, garbage=4, deflate=True, clean=True)
-    new_doc.close()
+    doc.save(buf, garbage=4, deflate=True, clean=True)
     doc.close()
 
     # Nazwa pliku
@@ -190,7 +178,7 @@ def generate_all_certificates(
 
 
 if __name__ == "__main__":
-    print("Test generowania certyfikatów v4.0 (300 DPI)...")
+    print("Test generowania certyfikatów v5.0 (wektorowy, bez artefaktów)...")
 
     result_tp = generate_certificate(
         cert_type="TP",
@@ -198,7 +186,7 @@ if __name__ == "__main__":
         cert_number="11642/GSA/2026/TP",
         date_str="2026-07-21"
     )
-    with open("/tmp/test_v4_TP.pdf", "wb") as f:
+    with open("/tmp/test_v5_TP.pdf", "wb") as f:
         f.write(result_tp["pdf_bytes"])
     print(f"TP: {result_tp['filename']} ({len(result_tp['pdf_bytes'])/1024:.0f} KB)")
 
@@ -208,8 +196,19 @@ if __name__ == "__main__":
         cert_number="11642/GSA/2026/GYM",
         date_str="2026-07-21"
     )
-    with open("/tmp/test_v4_GYM.pdf", "wb") as f:
+    with open("/tmp/test_v5_GYM.pdf", "wb") as f:
         f.write(result_gym["pdf_bytes"])
     print(f"GYM: {result_gym['filename']} ({len(result_gym['pdf_bytes'])/1024:.0f} KB)")
 
-    print("Gotowe! Sprawdź /tmp/test_v4_TP.pdf i /tmp/test_v4_GYM.pdf")
+    # Test z długim imieniem
+    result_long = generate_certificate(
+        cert_type="TP",
+        full_name="Małgorzata Wiśniewska-Kowalska",
+        cert_number="11643/GSA/2026/TP",
+        date_str="2026-07-21"
+    )
+    with open("/tmp/test_v5_long.pdf", "wb") as f:
+        f.write(result_long["pdf_bytes"])
+    print(f"Long name: {result_long['filename']} ({len(result_long['pdf_bytes'])/1024:.0f} KB)")
+
+    print("Gotowe!")
