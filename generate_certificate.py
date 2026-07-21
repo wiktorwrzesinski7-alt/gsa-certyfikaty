@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 """
-GSA Certificate Generator v5.0
+GSA Certificate Generator v6.0
 Nakłada tekst bezpośrednio na oficjalne szablony PDF.
 
 Podejście:
-- Zamiast redakcji (która zostawia widoczną białą ramkę), używamy draw_rect
-  z dokładnym bbox placeholdera — przykrywa stary tekst bez artefaktów.
+- Używamy add_redact_annot z fill=None (przezroczyste tło) — usuwa stary tekst
+  bez żadnej białej ramki ani artefaktów.
 - Tekst jest wektorowy — perfekcyjna ostrość przy każdym druku.
 - Polskie znaki obsługiwane przez fitz.TextWriter + Montserrat.
 """
@@ -40,9 +40,9 @@ BLUE_COLOR = (0.0, 0.62, 0.84)   # Niebieski kolor imienia (#0ea8da)
 DARK_COLOR = (0.15, 0.15, 0.15)  # Ciemny kolor daty i numeru
 
 # Dokładne bboxes placeholderów (z analizy szablonu):
-# [Imię i nazwisko]: (262.2, 239.3, 580.0, 286.0) — size 38.3pt, kolor #0ea8da
-# [Numer]: (120.7, 481.9, 179.8, 498.5) — size 13.8pt
-# Wrocław, [data]: (354.4, 411.6, 487.8, 431.7) — size 16.8pt
+# [Imię i nazwisko]: (262.2, 239.3, 580.0, 286.0)
+# [Numer]: (120.7, 481.9, 179.8, 498.5)
+# Wrocław, [data]: (354.4, 411.6, 487.8, 431.7)
 PLACEHOLDER_NAME = fitz.Rect(262.2, 239.3, 580.0, 286.0)
 PLACEHOLDER_NUMBER = fitz.Rect(120.7, 481.9, 179.8, 498.5)
 PLACEHOLDER_DATE = fitz.Rect(354.4, 411.6, 487.8, 431.7)
@@ -98,11 +98,12 @@ def generate_certificate(
     # Załaduj czcionkę
     font_reg = fitz.Font(fontfile=FONT_REGULAR)
 
-    # --- Krok 1: Przykryj placeholdery białymi prostokątami (bez ramki) ---
-    # Używamy draw_rect zamiast redakcji — brak artefaktów, czyste krawędzie
-    page.draw_rect(PLACEHOLDER_NAME, color=None, fill=(1, 1, 1), width=0)
-    page.draw_rect(PLACEHOLDER_NUMBER, color=None, fill=(1, 1, 1), width=0)
-    page.draw_rect(PLACEHOLDER_DATE, color=None, fill=(1, 1, 1), width=0)
+    # --- Krok 1: Usuń placeholdery przez przezroczystą redakcję (fill=None) ---
+    # fill=None = przezroczyste tło — usuwa tekst bez białej ramki
+    page.add_redact_annot(PLACEHOLDER_NAME, fill=None)
+    page.add_redact_annot(PLACEHOLDER_NUMBER, fill=None)
+    page.add_redact_annot(PLACEHOLDER_DATE, fill=None)
+    page.apply_redactions(images=fitz.PDF_REDACT_IMAGE_NONE)  # Nie ruszaj obrazków
 
     # --- Krok 2: Wstaw imię i nazwisko (wycentrowane, niebieskie) ---
     name_font_size = 36.0
@@ -137,8 +138,9 @@ def generate_certificate(
     tw_dark.write_text(page)
 
     # Zapisz do bytes — wektorowy PDF, perfekcyjna jakość druku
+    # garbage=3 (bez clean=True) żeby zachować fonty TextWriter
     buf = io.BytesIO()
-    doc.save(buf, garbage=4, deflate=True, clean=True)
+    doc.save(buf, garbage=3, deflate=True)
     doc.close()
 
     # Nazwa pliku
@@ -178,7 +180,7 @@ def generate_all_certificates(
 
 
 if __name__ == "__main__":
-    print("Test generowania certyfikatów v5.0 (wektorowy, bez artefaktów)...")
+    print("Test generowania certyfikatów v6.0 (przezroczysta redakcja, bez artefaktów)...")
 
     result_tp = generate_certificate(
         cert_type="TP",
@@ -186,7 +188,7 @@ if __name__ == "__main__":
         cert_number="11642/GSA/2026/TP",
         date_str="2026-07-21"
     )
-    with open("/tmp/test_v5_TP.pdf", "wb") as f:
+    with open("/tmp/test_v6_TP.pdf", "wb") as f:
         f.write(result_tp["pdf_bytes"])
     print(f"TP: {result_tp['filename']} ({len(result_tp['pdf_bytes'])/1024:.0f} KB)")
 
@@ -196,7 +198,7 @@ if __name__ == "__main__":
         cert_number="11642/GSA/2026/GYM",
         date_str="2026-07-21"
     )
-    with open("/tmp/test_v5_GYM.pdf", "wb") as f:
+    with open("/tmp/test_v6_GYM.pdf", "wb") as f:
         f.write(result_gym["pdf_bytes"])
     print(f"GYM: {result_gym['filename']} ({len(result_gym['pdf_bytes'])/1024:.0f} KB)")
 
@@ -207,7 +209,7 @@ if __name__ == "__main__":
         cert_number="11643/GSA/2026/TP",
         date_str="2026-07-21"
     )
-    with open("/tmp/test_v5_long.pdf", "wb") as f:
+    with open("/tmp/test_v6_long.pdf", "wb") as f:
         f.write(result_long["pdf_bytes"])
     print(f"Long name: {result_long['filename']} ({len(result_long['pdf_bytes'])/1024:.0f} KB)")
 

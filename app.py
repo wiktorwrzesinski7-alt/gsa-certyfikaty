@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-GSA Certificate Generator API - v3.0
+GSA Certificate Generator API - v6.0
 Nakłada tekst na oficjalne szablony PDF (PERSONALTRAINER.pdf, GYMINSTRUCTOR.pdf).
 Obsługuje polskie znaki, wektorowy PDF, jakość druku.
 """
@@ -21,7 +21,7 @@ def health():
     return jsonify({
         'status': 'ok',
         'service': 'GSA Certificate Generator',
-        'version': '5.0',
+        'version': '6.0',
         'quality': 'vector PDF, no artifacts, print-ready',
         'templates': ['PERSONALTRAINER.pdf', 'GYMINSTRUCTOR.pdf']
     })
