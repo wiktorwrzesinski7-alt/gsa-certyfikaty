@@ -1,9 +1,14 @@
 #!/usr/bin/env python3
 """
-GSA Certificate Generator v3.0
-Nakłada tekst bezpośrednio na oficjalne szablony PDF (PERSONALTRAINER.pdf, GYMINSTRUCTOR.pdf).
-Używa fitz.TextWriter dla pełnej obsługi polskich znaków (ą, ę, ó, ś, ł, ź, ż, ć, ń).
-Jakość druku: wektorowy PDF, doskonała ostrość.
+GSA Certificate Generator v4.0
+Generuje certyfikaty w jakości druku 300 DPI.
+
+Podejście:
+1. Otwórz szablon PDF i nanieś tekst (imię, data, numer)
+2. Wyrenderuj stronę jako obraz 300 DPI (raster)
+3. Zapisz obraz jako nowy PDF — pełna jakość druku, ~2-3 MB
+
+Dzięki temu wszystkie elementy (logo, mapa, podpis) są w 300 DPI.
 """
 
 import fitz  # PyMuPDF
@@ -36,10 +41,8 @@ TEMPLATES = {
 BLUE_COLOR = (0.0, 0.62, 0.84)   # Niebieski kolor imienia
 DARK_COLOR = (0.15, 0.15, 0.15)  # Ciemny kolor daty i numeru
 
-# Znane pozycje placeholderów (z analizy szablonu):
-# [Imię i nazwisko]: bbox (262, 239, 580, 286) — size 38.3pt, kolor niebieski
-# [Numer]: bbox (121, 482, 180, 498) — size 13.8pt
-# Wrocław, [data]: bbox (354, 412, 488, 432) — size 16.8pt, wycentrowane
+# Rozdzielczość renderowania (DPI)
+RENDER_DPI = 300
 
 
 def format_date_polish(date_str=None):
@@ -65,7 +68,7 @@ def generate_certificate(
     date_str: str = None
 ) -> dict:
     """
-    Generuje certyfikat PDF nakładając tekst na oficjalny szablon.
+    Generuje certyfikat PDF w jakości druku 300 DPI.
 
     Args:
         cert_type: "TP" (Personal Trainer) lub "GYM" (Gym Instructor)
@@ -88,41 +91,28 @@ def generate_certificate(
     doc = fitz.open(template_path)
     page = doc[0]
     page_width = page.rect.width   # 842.25
+    page_height = page.rect.height  # 595.5
 
     # Załaduj czcionkę
     font_reg = fitz.Font(fontfile=FONT_REGULAR)
 
     # --- Krok 1: Usuń placeholdery (precyzyjne prostokąty redakcji) ---
-    # [Imię i nazwisko]: bbox (262, 239, 580, 286)
-    page.add_redact_annot(
-        fitz.Rect(255, 236, 590, 289),
-        fill=(1, 1, 1)
-    )
-    # [Numer]: bbox (121, 482, 180, 498)
-    page.add_redact_annot(
-        fitz.Rect(115, 479, 250, 501),
-        fill=(1, 1, 1)
-    )
-    # Wrocław, [data]: bbox (354, 412, 488, 432)
-    page.add_redact_annot(
-        fitz.Rect(340, 409, 510, 435),
-        fill=(1, 1, 1)
-    )
-
+    page.add_redact_annot(fitz.Rect(255, 236, 590, 289), fill=(1, 1, 1))
+    page.add_redact_annot(fitz.Rect(115, 479, 250, 501), fill=(1, 1, 1))
+    page.add_redact_annot(fitz.Rect(340, 409, 510, 435), fill=(1, 1, 1))
     page.apply_redactions()
 
     # --- Krok 2: Wstaw imię i nazwisko (wycentrowane, niebieskie) ---
     name_font_size = 36.0
     name_tw = font_reg.text_length(full_name, fontsize=name_font_size)
 
-    # Skaluj w dół jeśli imię za długie (max 75% szerokości strony)
     max_name_width = page_width * 0.75
     while name_tw > max_name_width and name_font_size > 18:
         name_font_size -= 1.0
         name_tw = font_reg.text_length(full_name, fontsize=name_font_size)
 
     name_x = (page_width - name_tw) / 2
-    name_y = 276  # baseline (środek bbox 239-286 + offset dla baseline)
+    name_y = 276
 
     tw_name = fitz.TextWriter(page.rect, color=BLUE_COLOR)
     tw_name.append((name_x, name_y), full_name, font=font_reg, fontsize=name_font_size)
@@ -133,19 +123,34 @@ def generate_certificate(
     date_font_size = 16.8
     date_tw_width = font_reg.text_length(date_text, fontsize=date_font_size)
     date_x = (page_width - date_tw_width) / 2
-    date_y = 428  # baseline (środek bbox 412-432)
+    date_y = 428
 
     tw_dark = fitz.TextWriter(page.rect, color=DARK_COLOR)
     tw_dark.append((date_x, date_y), date_text, font=font_reg, fontsize=date_font_size)
 
-    # --- Krok 4: Wstaw numer certyfikatu (lewy dolny róg) ---
+    # --- Krok 4: Wstaw numer certyfikatu ---
     tw_dark.append((121, 494), cert_number, font=font_reg, fontsize=13.8)
-
     tw_dark.write_text(page)
+
+    # --- Krok 5: Wyrenderuj stronę jako obraz 300 DPI ---
+    scale = RENDER_DPI / 72.0  # 72 DPI to domyślna rozdzielczość PDF
+    mat = fitz.Matrix(scale, scale)
+    pix = page.get_pixmap(matrix=mat, alpha=False)
+
+    # --- Krok 6: Zapisz obraz jako nowy PDF (A4, 300 DPI) ---
+    # Nowy dokument PDF z jedną stroną A4
+    new_doc = fitz.open()
+    new_page = new_doc.new_page(width=page_width, height=page_height)
+
+    # Wstaw wyrenderowany obraz jako pełnostronicowy obrazek
+    img_bytes = pix.tobytes("jpeg", jpg_quality=98)
+    img_rect = fitz.Rect(0, 0, page_width, page_height)
+    new_page.insert_image(img_rect, stream=img_bytes)
 
     # Zapisz do bytes
     buf = io.BytesIO()
-    doc.save(buf, garbage=4, deflate=True, clean=True)
+    new_doc.save(buf, garbage=4, deflate=True, clean=True)
+    new_doc.close()
     doc.close()
 
     # Nazwa pliku
@@ -171,7 +176,6 @@ def generate_all_certificates(
 ) -> list:
     """
     Generuje oba certyfikaty (Personal Trainer + Gym Instructor) jednocześnie.
-    Jeśli cert_number_gym nie podany, używa tego samego numeru co TP.
     """
     results = []
 
@@ -186,27 +190,26 @@ def generate_all_certificates(
 
 
 if __name__ == "__main__":
-    print("Test generowania certyfikatów v3.0...")
+    print("Test generowania certyfikatów v4.0 (300 DPI)...")
 
-    # Test z polskim imieniem
     result_tp = generate_certificate(
         cert_type="TP",
         full_name="Małgorzata Wiśniewska",
         cert_number="11642/GSA/2026/TP",
         date_str="2026-07-21"
     )
-    with open("/tmp/test_v3_TP.pdf", "wb") as f:
+    with open("/tmp/test_v4_TP.pdf", "wb") as f:
         f.write(result_tp["pdf_bytes"])
     print(f"TP: {result_tp['filename']} ({len(result_tp['pdf_bytes'])/1024:.0f} KB)")
 
     result_gym = generate_certificate(
         cert_type="GYM",
         full_name="Małgorzata Wiśniewska",
-        cert_number="11642/GSA/2026/ZNB",
+        cert_number="11642/GSA/2026/GYM",
         date_str="2026-07-21"
     )
-    with open("/tmp/test_v3_GYM.pdf", "wb") as f:
+    with open("/tmp/test_v4_GYM.pdf", "wb") as f:
         f.write(result_gym["pdf_bytes"])
     print(f"GYM: {result_gym['filename']} ({len(result_gym['pdf_bytes'])/1024:.0f} KB)")
 
-    print("Gotowe! Sprawdź /tmp/test_v3_TP.pdf i /tmp/test_v3_GYM.pdf")
+    print("Gotowe! Sprawdź /tmp/test_v4_TP.pdf i /tmp/test_v4_GYM.pdf")
