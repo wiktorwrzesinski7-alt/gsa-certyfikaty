@@ -21,7 +21,7 @@ def health():
     return jsonify({
         'status': 'ok',
         'service': 'GSA Certificate Generator',
-        'version': '3.0',
+        'version': '3.1',
         'quality': 'vector PDF (print-ready)',
         'templates': ['PERSONALTRAINER.pdf', 'GYMINSTRUCTOR.pdf']
     })
