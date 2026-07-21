@@ -9,6 +9,7 @@ from flask import Flask, request, jsonify
 import base64
 import os
 import traceback
+import requests as http_requests
 
 from generate_certificate import generate_certificate, generate_all_certificates
 
@@ -134,6 +135,97 @@ def generate_both():
         return jsonify({
             'success': True,
             'full_name': full_name,
+            'certificates': certificates
+        })
+
+    except Exception as e:
+        traceback.print_exc()
+        return jsonify({'success': False, 'error': str(e)}), 500
+
+
+# Registry spreadsheet ID (rejestr certyfikatów GSA)
+REGISTRY_SHEET_ID = '1X-FOgr4iQtYT30iBGpp6l7O_yKH4UKT9ZOqgGFpdPuU'
+
+
+def lookup_cert_number(full_name: str) -> str:
+    """
+    Wyszukuje numer certyfikatu w rejestrze GSA po imieniu i nazwisku.
+    Rejestr: col B = numer certyfikatu, col C = imię i nazwisko.
+    Zwraca ostatni (najnowszy) numer dla danego uczestnika.
+    """
+    try:
+        url = f'https://docs.google.com/spreadsheets/d/{REGISTRY_SHEET_ID}/gviz/tq?tqx=out:csv&sheet=Arkusz1&range=B1:C20000'
+        r = http_requests.get(url, timeout=15)
+        r.raise_for_status()
+        lines = r.text.strip().split('\n')
+        # Szukamy od końca (najnowszy wpis)
+        name_clean = full_name.strip().lower()
+        for line in reversed(lines):
+            parts = line.split(',"')
+            if len(parts) >= 2:
+                cert_num = parts[0].strip('"').strip()
+                reg_name = parts[1].strip('"').strip().lower()
+                if reg_name == name_clean:
+                    return cert_num
+        return None
+    except Exception as e:
+        app.logger.error(f'Błąd wyszukiwania w rejestrze: {e}')
+        return None
+
+
+@app.route('/generate_auto', methods=['POST'])
+def generate_auto():
+    """
+    Generuje oba certyfikaty automatycznie — wyszukuje numer certyfikatu w rejestrze.
+
+    Body JSON:
+        full_name: str — Imię i nazwisko uczestnika (musi być identyczne jak w rejestrze)
+        date_str: str (opcjonalnie) — Data w formacie YYYY-MM-DD lub DD.MM.YYYY
+
+    Returns:
+        JSON z listą dwóch certyfikatów (TP + GYM), każdy z pdf_base64 i filename
+    """
+    try:
+        data = request.get_json()
+        if not data:
+            return jsonify({'success': False, 'error': 'No JSON body'}), 400
+
+        full_name = data.get('full_name', '').strip()
+        date_str = data.get('date_str', None)
+
+        if not full_name:
+            return jsonify({'success': False, 'error': 'full_name is required'}), 400
+
+        # Wyszukaj numer certyfikatu w rejestrze
+        cert_number_tp = lookup_cert_number(full_name)
+        if not cert_number_tp:
+            return jsonify({
+                'success': False,
+                'error': f'Nie znaleziono certyfikatu dla: "{full_name}" w rejestrze GSA'
+            }), 404
+
+        results = generate_all_certificates(
+            full_name=full_name,
+            cert_number_tp=cert_number_tp,
+            date_str=date_str
+        )
+
+        certificates = []
+        for r in results:
+            certificates.append({
+                'cert_type': r['cert_type'],
+                'filename': r['filename'],
+                'cert_number': r['cert_number'],
+                'date': r['date'],
+                'size_bytes': len(r['pdf_bytes']),
+                'size_kb': round(len(r['pdf_bytes']) / 1024, 1),
+                'pdf_base64': base64.b64encode(r['pdf_bytes']).decode('utf-8')
+            })
+
+        return jsonify({
+            'success': True,
+            'full_name': full_name,
+            'cert_number_tp': cert_number_tp,
             'certificates': certificates
         })
 
