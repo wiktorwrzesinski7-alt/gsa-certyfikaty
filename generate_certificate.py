@@ -1,278 +1,212 @@
 #!/usr/bin/env python3
 """
-Generator certyfikatów GSA - wersja 2.0 (300 DPI, jakość druku)
-Nakłada tekst na oryginalne obrazy PNG i generuje PDF gotowy do druku.
-
-Rozdzielczość: 3508 x 2480 px @ 300 DPI (A4 landscape)
-Rozmiar pliku: ~1-1.5 MB (doskonała jakość druku)
+GSA Certificate Generator v3.0
+Nakłada tekst bezpośrednio na oficjalne szablony PDF (PERSONALTRAINER.pdf, GYMINSTRUCTOR.pdf).
+Używa fitz.TextWriter dla pełnej obsługi polskich znaków (ą, ę, ó, ś, ł, ź, ż, ć, ń).
+Jakość druku: wektorowy PDF, doskonała ostrość.
 """
 
-from PIL import Image, ImageDraw, ImageFont
-from reportlab.lib.pagesizes import A4, landscape
-from reportlab.pdfgen import canvas as rl_canvas
-from reportlab.lib.units import mm
-from reportlab.lib.utils import ImageReader
+import fitz  # PyMuPDF
 import io
 import os
+from datetime import datetime
 
-# Ścieżki do zasobów
+# Ścieżki
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 TEMPLATES_DIR = os.path.join(SCRIPT_DIR, 'templates')
 FONTS_DIR = os.path.join(SCRIPT_DIR, 'fonts')
 
-# Czcionki
 FONT_REGULAR = os.path.join(FONTS_DIR, 'Montserrat-Regular.ttf')
 FONT_BOLD = os.path.join(FONTS_DIR, 'Montserrat-Bold.ttf')
-FONT_SEMIBOLD = os.path.join(FONTS_DIR, 'Montserrat-SemiBold.ttf')
 
-# Rozmiar obrazu certyfikatu: 3508 x 2480 px @ 300 DPI (A4 landscape)
-IMG_W = 3508
-IMG_H = 2480
-DPI = 300
-
-# Skala względem oryginalnego 2000x1414: 3508/2000 = 1.754
-SCALE = 3508 / 2000
-
-
-def _s(val):
-    """Skaluje wartość z oryginalnych 2000px do 3508px."""
-    return int(val * SCALE)
-
-
-# Konfiguracja pozycji tekstu (przeskalowana do 300 DPI)
-TEXT_CONFIG_WITH_LOGO = {
-    'name_y': _s(635),
-    'name_size': _s(72),
-    'subtitle_y': _s(738),
-    'subtitle_size': _s(40),
-    'draw_subtitle': True,
-    'course_y': _s(800),
-    'course_size': _s(58),
-    'location_y': _s(952),
-    'location_size': _s(44),
-    'cover_rects': [],
+# Polskie nazwy miesięcy
+POLISH_MONTHS = {
+    1: "stycznia", 2: "lutego", 3: "marca", 4: "kwietnia",
+    5: "maja", 6: "czerwca", 7: "lipca", 8: "sierpnia",
+    9: "września", 10: "października", 11: "listopada", 12: "grudnia"
 }
 
-TEXT_CONFIG_NO_LOGO = {
-    'name_y': _s(555),
-    'name_size': _s(72),
-    'subtitle_y': _s(694),
-    'subtitle_size': _s(40),
-    'draw_subtitle': False,
-    'course_y': _s(770),
-    'course_size': _s(52),
-    'location_y': _s(989),
-    'location_size': _s(44),
-    'cover_rects': [(_s(720), _s(975), _s(1010), _s(1030))],
+# Szablony certyfikatów
+TEMPLATES = {
+    "TP": os.path.join(TEMPLATES_DIR, "PERSONALTRAINER.pdf"),
+    "GYM": os.path.join(TEMPLATES_DIR, "GYMINSTRUCTOR.pdf"),
 }
 
-# Kolory tekstu
-NAME_COLOR = (20, 20, 20)
-SUBTITLE_COLOR = (60, 60, 60)
-COURSE_COLOR = (20, 20, 20)
-LOCATION_COLOR = (20, 20, 20)
+# Kolory
+BLUE_COLOR = (0.0, 0.62, 0.84)   # Niebieski kolor imienia
+DARK_COLOR = (0.15, 0.15, 0.15)  # Ciemny kolor daty i numeru
 
-# Definicje certyfikatów
-CERT_CONFIGS = {
-    '1': {
-        'template': '1.png',
-        'name': 'Certyfikat_TP_PLTP',
-        'text_config': TEXT_CONFIG_WITH_LOGO,
-    },
-    '2': {
-        'template': '2_blank.png',
-        'name': 'Certyfikat_GYM',
-        'text_config': TEXT_CONFIG_WITH_LOGO,
-    },
-    '3': {
-        'template': '3.png',
-        'name': 'Certyfikat_GYM_v2',
-        'text_config': TEXT_CONFIG_NO_LOGO,
-    },
-    '4': {
-        'template': '4.png',
-        'name': 'Certyfikat_TP',
-        'text_config': TEXT_CONFIG_NO_LOGO,
-    },
-}
+# Znane pozycje placeholderów (z analizy szablonu):
+# [Imię i nazwisko]: bbox (262, 239, 580, 286) — size 38.3pt, kolor niebieski
+# [Numer]: bbox (121, 482, 180, 498) — size 13.8pt
+# Wrocław, [data]: bbox (354, 412, 488, 432) — size 16.8pt, wycentrowane
 
 
-def draw_centered_text(draw, text, y, font, color, img_width=IMG_W):
-    """Rysuje tekst wycentrowany poziomo."""
-    bbox = draw.textbbox((0, 0), text, font=font)
-    text_width = bbox[2] - bbox[0]
-    x = (img_width - text_width) / 2
-    draw.text((x, y), text, font=font, fill=color)
-
-
-def _scaled_font(font_path, base_size, text, max_w=None):
-    """Zwraca czcionkę o odpowiednim rozmiarze, skalując w dół jeśli tekst za długi."""
-    if max_w is None:
-        max_w = int(IMG_W * 0.85)
-    size = base_size
-    tmp_draw = ImageDraw.Draw(Image.new('RGB', (1, 1)))
-    while size > 30:
-        f = ImageFont.truetype(font_path, size)
-        bb = tmp_draw.textbbox((0, 0), text, font=f)
-        if (bb[2] - bb[0]) <= max_w:
-            return f
-        size -= 4
-    return ImageFont.truetype(font_path, 30)
+def format_date_polish(date_str=None):
+    """Formatuje datę jako 'DD miesiąca YYYY r.' po polsku."""
+    dt = None
+    if date_str:
+        for fmt in ["%Y-%m-%d", "%d.%m.%Y", "%d/%m/%Y"]:
+            try:
+                dt = datetime.strptime(date_str.strip(), fmt)
+                break
+            except ValueError:
+                pass
+    if dt is None:
+        dt = datetime.now()
+    month = POLISH_MONTHS[dt.month]
+    return f"{dt.day} {month} {dt.year} r."
 
 
 def generate_certificate(
-    cert_type,
-    imie_nazwisko,
-    nazwa_kursu,
-    miasto,
-    data_ukonczenia,
-    output_path=None
-):
+    cert_type: str,
+    full_name: str,
+    cert_number: str,
+    date_str: str = None
+) -> dict:
     """
-    Generuje certyfikat jako PDF w jakości druku (300 DPI, ~1 MB).
+    Generuje certyfikat PDF nakładając tekst na oficjalny szablon.
 
     Args:
-        cert_type: '1', '2', '3' lub '4'
-        imie_nazwisko: Imię i nazwisko kursanta
-        nazwa_kursu: Nazwa kursu (może zawierać miasto po przecinku)
-        miasto: Miasto kursu
-        data_ukonczenia: Data ukończenia (np. "11.07.2026")
-        output_path: Ścieżka do zapisu PDF (opcjonalna)
+        cert_type: "TP" (Personal Trainer) lub "GYM" (Gym Instructor)
+        full_name: Imię i nazwisko uczestnika
+        cert_number: Numer certyfikatu (np. "11642/GSA/2026/TP")
+        date_str: Data (YYYY-MM-DD lub DD.MM.YYYY), domyślnie dzisiaj
 
     Returns:
-        bytes: Zawartość pliku PDF
+        dict z 'pdf_bytes' (bytes) i 'filename' (str)
     """
-    config = CERT_CONFIGS[str(cert_type)]
-    tc = config['text_config']
-    template_path = os.path.join(TEMPLATES_DIR, config['template'])
+    template_path = TEMPLATES.get(cert_type)
+    if not template_path:
+        raise ValueError(f"Nieznany typ certyfikatu: {cert_type}. Użyj 'TP' lub 'GYM'.")
+    if not os.path.exists(template_path):
+        raise FileNotFoundError(f"Szablon nie istnieje: {template_path}")
 
-    def _extract_city(s):
-        parts = s.rsplit(',', 1)
-        if len(parts) == 2 and not any(c.isdigit() for c in parts[1]):
-            return parts[1].strip()
-        return ''
+    formatted_date = format_date_polish(date_str)
 
-    def _strip_city(s):
-        parts = s.rsplit(',', 1)
-        if len(parts) == 2 and not any(c.isdigit() for c in parts[1]):
-            return parts[0].strip()
-        return s.strip()
+    # Otwórz szablon PDF
+    doc = fitz.open(template_path)
+    page = doc[0]
+    page_width = page.rect.width   # 842.25
 
-    miasto_kursu = _extract_city(nazwa_kursu)
-    if not miasto_kursu:
-        miasto_kursu = miasto.strip() if miasto else 'Wrocław'
-    nazwa_kursu_clean = _strip_city(nazwa_kursu)
+    # Załaduj czcionkę
+    font_reg = fitz.Font(fontfile=FONT_REGULAR)
 
-    # Wczytaj obraz tła (już w 300 DPI: 3508x2480)
-    img = Image.open(template_path).convert('RGB')
+    # --- Krok 1: Usuń placeholdery (precyzyjne prostokąty redakcji) ---
+    # [Imię i nazwisko]: bbox (262, 239, 580, 286)
+    page.add_redact_annot(
+        fitz.Rect(255, 236, 590, 289),
+        fill=(1, 1, 1)
+    )
+    # [Numer]: bbox (121, 482, 180, 498)
+    page.add_redact_annot(
+        fitz.Rect(115, 479, 250, 501),
+        fill=(1, 1, 1)
+    )
+    # Wrocław, [data]: bbox (354, 412, 488, 432)
+    page.add_redact_annot(
+        fitz.Rect(340, 409, 510, 435),
+        fill=(1, 1, 1)
+    )
 
-    # Upewnij się że obraz ma właściwy rozmiar
-    if img.size != (IMG_W, IMG_H):
-        img = img.resize((IMG_W, IMG_H), Image.LANCZOS)
+    page.apply_redactions()
 
-    draw = ImageDraw.Draw(img)
+    # --- Krok 2: Wstaw imię i nazwisko (wycentrowane, niebieskie) ---
+    name_font_size = 36.0
+    name_tw = font_reg.text_length(full_name, fontsize=name_font_size)
 
-    # Zakryj wbite teksty białym prostokątem
-    for rect in tc.get('cover_rects', []):
-        draw.rectangle(rect, fill=(255, 255, 255))
+    # Skaluj w dół jeśli imię za długie (max 75% szerokości strony)
+    max_name_width = page_width * 0.75
+    while name_tw > max_name_width and name_font_size > 18:
+        name_font_size -= 1.0
+        name_tw = font_reg.text_length(full_name, fontsize=name_font_size)
 
-    # Załaduj czcionki
-    font_name = _scaled_font(FONT_SEMIBOLD, tc['name_size'], imie_nazwisko)
-    font_subtitle = ImageFont.truetype(FONT_REGULAR, tc['subtitle_size'])
-    font_course = _scaled_font(FONT_REGULAR, tc['course_size'], nazwa_kursu_clean)
-    font_location = ImageFont.truetype(FONT_BOLD, tc['location_size'])
+    name_x = (page_width - name_tw) / 2
+    name_y = 276  # baseline (środek bbox 239-286 + offset dla baseline)
 
-    # Narysuj imię i nazwisko
-    draw_centered_text(draw, imie_nazwisko, tc['name_y'], font_name, NAME_COLOR)
+    tw_name = fitz.TextWriter(page.rect, color=BLUE_COLOR)
+    tw_name.append((name_x, name_y), full_name, font=font_reg, fontsize=name_font_size)
+    tw_name.write_text(page)
 
-    # Narysuj 'Ukończył(-a) kurs' tylko jeśli nie ma go w szablonie
-    if tc.get('draw_subtitle', True):
-        draw_centered_text(draw, 'Ukończył(-a) kurs', tc['subtitle_y'], font_subtitle, SUBTITLE_COLOR)
+    # --- Krok 3: Wstaw datę (wycentrowana) ---
+    date_text = f"Wrocław, {formatted_date}"
+    date_font_size = 16.8
+    date_tw_width = font_reg.text_length(date_text, fontsize=date_font_size)
+    date_x = (page_width - date_tw_width) / 2
+    date_y = 428  # baseline (środek bbox 412-432)
 
-    # Narysuj nazwę kursu (bez miasta)
-    draw_centered_text(draw, nazwa_kursu_clean, tc['course_y'], font_course, COURSE_COLOR)
+    tw_dark = fitz.TextWriter(page.rect, color=DARK_COLOR)
+    tw_dark.append((date_x, date_y), date_text, font=font_reg, fontsize=date_font_size)
 
-    # Narysuj miejsce wydania (zawsze Wrocław) i datę
-    location_text = f'Wrocław, {data_ukonczenia}'
-    draw_centered_text(draw, location_text, tc['location_y'], font_location, LOCATION_COLOR)
+    # --- Krok 4: Wstaw numer certyfikatu (lewy dolny róg) ---
+    tw_dark.append((121, 494), cert_number, font=font_reg, fontsize=13.8)
 
-    # Konwertuj do PDF w jakości druku:
-    # - JPEG quality=100 (maksymalna jakość, brak artefaktów)
-    # - subsampling=0 (brak subsamplingu koloru - lepsza ostrość)
-    # - ReportLab do osadzenia w PDF z metadanymi DPI
-    jpeg_buf = io.BytesIO()
-    img.save(jpeg_buf, format='JPEG', quality=100, dpi=(DPI, DPI), subsampling=0, optimize=False)
-    jpeg_buf.seek(0)
+    tw_dark.write_text(page)
 
-    pdf_buf = io.BytesIO()
-    c = rl_canvas.Canvas(pdf_buf, pagesize=landscape(A4))
-    c.drawImage(ImageReader(jpeg_buf), 0, 0, width=297*mm, height=210*mm, preserveAspectRatio=False)
-    c.save()
-    pdf_bytes = pdf_buf.getvalue()
+    # Zapisz do bytes
+    buf = io.BytesIO()
+    doc.save(buf, garbage=4, deflate=True, clean=True)
+    doc.close()
 
-    # Zapisz do pliku jeśli podano ścieżkę
-    if output_path:
-        os.makedirs(os.path.dirname(output_path), exist_ok=True)
-        with open(output_path, 'wb') as f:
-            f.write(pdf_bytes)
+    # Nazwa pliku
+    safe_name = full_name.strip().replace(" ", "_").replace("/", "-")
+    cert_label = "PersonalTrainer" if cert_type == "TP" else "GymInstructor"
+    filename = f"{safe_name}_{cert_label}.pdf"
 
-    return pdf_bytes
+    return {
+        "pdf_bytes": buf.getvalue(),
+        "filename": filename,
+        "cert_type": cert_type,
+        "full_name": full_name,
+        "cert_number": cert_number,
+        "date": formatted_date,
+    }
 
 
 def generate_all_certificates(
-    imie_nazwisko,
-    nazwa_kursu,
-    miasto,
-    data_ukonczenia,
-    output_dir=None
-):
-    """Generuje wszystkie 4 certyfikaty dla kursanta."""
-    results = {}
-    safe_name = imie_nazwisko.strip().replace(' ', '_').replace('/', '-')
+    full_name: str,
+    cert_number_tp: str,
+    cert_number_gym: str = None,
+    date_str: str = None
+) -> list:
+    """
+    Generuje oba certyfikaty (Personal Trainer + Gym Instructor) jednocześnie.
+    Jeśli cert_number_gym nie podany, używa tego samego numeru co TP.
+    """
+    results = []
 
-    for cert_type, config in CERT_CONFIGS.items():
-        cert_name = config['name']
-        filename = f"{safe_name}_{cert_name}.pdf"
+    tp_result = generate_certificate("TP", full_name, cert_number_tp, date_str)
+    results.append(tp_result)
 
-        if output_dir:
-            output_path = os.path.join(output_dir, filename)
-        else:
-            output_path = None
-
-        pdf_bytes = generate_certificate(
-            cert_type=cert_type,
-            imie_nazwisko=imie_nazwisko,
-            nazwa_kursu=nazwa_kursu,
-            miasto=miasto,
-            data_ukonczenia=data_ukonczenia,
-            output_path=output_path
-        )
-
-        results[cert_name] = {
-            'bytes': pdf_bytes,
-            'path': output_path,
-            'filename': filename
-        }
+    gym_number = cert_number_gym if cert_number_gym else cert_number_tp
+    gym_result = generate_certificate("GYM", full_name, gym_number, date_str)
+    results.append(gym_result)
 
     return results
 
 
-if __name__ == '__main__':
-    print("Generowanie testowych certyfikatów (300 DPI, JPEG q=100)...")
+if __name__ == "__main__":
+    print("Test generowania certyfikatów v3.0...")
 
-    output_dir = '/tmp/gsa_test_300dpi'
-    os.makedirs(output_dir, exist_ok=True)
-
-    results = generate_all_certificates(
-        imie_nazwisko="Jan Kowalski",
-        nazwa_kursu="Kurs Trenera Personalnego",
-        miasto="Wrocław",
-        data_ukonczenia="11.07.2026",
-        output_dir=output_dir
+    # Test z polskim imieniem
+    result_tp = generate_certificate(
+        cert_type="TP",
+        full_name="Małgorzata Wiśniewska",
+        cert_number="11642/GSA/2026/TP",
+        date_str="2026-07-21"
     )
+    with open("/tmp/test_v3_TP.pdf", "wb") as f:
+        f.write(result_tp["pdf_bytes"])
+    print(f"TP: {result_tp['filename']} ({len(result_tp['pdf_bytes'])/1024:.0f} KB)")
 
-    for name, data in results.items():
-        size_mb = len(data['bytes']) / 1024 / 1024
-        print(f"  ✓ {data['filename']} ({size_mb:.2f} MB) → {data['path']}")
+    result_gym = generate_certificate(
+        cert_type="GYM",
+        full_name="Małgorzata Wiśniewska",
+        cert_number="11642/GSA/2026/ZNB",
+        date_str="2026-07-21"
+    )
+    with open("/tmp/test_v3_GYM.pdf", "wb") as f:
+        f.write(result_gym["pdf_bytes"])
+    print(f"GYM: {result_gym['filename']} ({len(result_gym['pdf_bytes'])/1024:.0f} KB)")
 
-    print(f"\nGotowe! Pliki zapisane w: {output_dir}")
+    print("Gotowe! Sprawdź /tmp/test_v3_TP.pdf i /tmp/test_v3_GYM.pdf")
